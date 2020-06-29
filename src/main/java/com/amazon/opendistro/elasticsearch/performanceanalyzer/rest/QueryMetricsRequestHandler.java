@@ -110,6 +110,11 @@ public class QueryMetricsRequestHandler extends MetricsHandler implements HttpHa
         return;
       }
 
+      if (isHelloQuery(exchange)) {
+        getHelloResponse(exchange);
+        return;
+      }
+
       Map<String, String> params = getParamsMap(exchange.getRequestURI().getQuery());
 
       exchange.getResponseHeaders().set("Content-Type", "application/json");
@@ -246,6 +251,13 @@ public class QueryMetricsRequestHandler extends MetricsHandler implements HttpHa
     return false;
   }
 
+  private boolean isHelloQuery(HttpExchange exchange) throws IOException {
+    if (exchange.getRequestURI().toString().equals(Util.METRICS_QUERY_URL + "/hello")) {
+      return true;
+    }
+    return false;
+  }
+
   private void getMetricUnits(HttpExchange exchange) throws IOException {
     Map<String, String> metricUnits = new HashMap<>();
     for (Map.Entry<String, MetricAttributes> entry : MetricsModel.ALL_METRICS.entrySet()) {
@@ -255,6 +267,12 @@ public class QueryMetricsRequestHandler extends MetricsHandler implements HttpHa
     }
     sendResponse(
         exchange, JsonConverter.writeValueAsString(metricUnits), HttpURLConnection.HTTP_OK);
+  }
+
+  private void getHelloResponse(HttpExchange exchange) throws IOException {
+    Map<String, String> response = new HashMap<>();
+    response.put("message", "Hello there!");
+    sendResponse(exchange, JsonConverter.writeValueAsString(response), HttpURLConnection.HTTP_OK);
   }
 
   private boolean validParams(
