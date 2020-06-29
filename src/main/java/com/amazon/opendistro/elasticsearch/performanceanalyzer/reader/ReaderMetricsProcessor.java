@@ -22,6 +22,7 @@ import com.amazon.opendistro.elasticsearch.performanceanalyzer.metrics.AllMetric
 import com.amazon.opendistro.elasticsearch.performanceanalyzer.metrics.AllMetrics.MetricName;
 import com.amazon.opendistro.elasticsearch.performanceanalyzer.metrics.MetricsConfiguration;
 import com.amazon.opendistro.elasticsearch.performanceanalyzer.metrics.PerformanceAnalyzerMetrics;
+import com.amazon.opendistro.elasticsearch.performanceanalyzer.metricsdb.BatchMetricsDB;
 import com.amazon.opendistro.elasticsearch.performanceanalyzer.metricsdb.MetricsDB;
 import com.amazon.opendistro.elasticsearch.performanceanalyzer.reader_writer_shared.EventLog;
 import com.amazon.opendistro.elasticsearch.performanceanalyzer.reader_writer_shared.EventLogFileHandler;
@@ -65,6 +66,10 @@ public class ReaderMetricsProcessor implements Runnable {
   private final String rootLocation;
   private static final Map<String, Double> TIMING_STATS = new HashMap<>();
   private static final Map<String, String> STATS_DATA = new HashMap<>();
+  private NavigableMap<Long, BatchMetricsDB> batchDBMap;
+  BatchMetricsDB currentBatchDB;
+  long currentBatchDBStartTime;
+
 
   static {
     STATS_DATA.put("MethodName", "ProcessMetrics");
@@ -90,6 +95,7 @@ public class ReaderMetricsProcessor implements Runnable {
     conn = DriverManager.getConnection(DB_URL);
     create = DSL.using(conn, SQLDialect.SQLITE);
     metricsDBMap = new ConcurrentSkipListMap<>();
+    batchDBMap = new ConcurrentSkipListMap<>();
     osMetricsMap = new TreeMap<>();
     shardRqMetricsMap = new TreeMap<>();
     httpRqMetricsMap = new TreeMap<>();
@@ -187,6 +193,14 @@ public class ReaderMetricsProcessor implements Runnable {
         LOG.error("Unable to close database - {}", db.getDBFilePath());
       }
     }
+
+    for (BatchMetricsDB db : batchDBMap.values()) {
+      try {
+        db.close();
+      } catch (Exception e) {
+        LOG.error("Unable to close database - {}", db.getDBFilePath());
+      }
+    }
   }
 
   public void trimOldSnapshots() throws Exception {
@@ -196,6 +210,8 @@ public class ReaderMetricsProcessor implements Runnable {
     trimMap(masterEventMetricsMap, MASTER_EVENT_SNAPSHOTS);
     trimDatabases(
         metricsDBMap, MAX_DATABASES, PluginSettings.instance().shouldCleanupMetricsDBFiles());
+    trimBatchMetricsDatabases(batchDBMap, PluginSettings.instance().getBatchCount(),
+            PluginSettings.instance().shouldCleanupBatchDBFiles());
 
     for (NavigableMap<Long, MemoryDBSnapshot> snap : nodeMetricsMap.values()) {
       // do the same thing as OS_SNAPSHOTS.  Eventually MemoryDBSnapshot
@@ -229,6 +245,21 @@ public class ReaderMetricsProcessor implements Runnable {
       Map.Entry<Long, MetricsDB> lowestEntry = map.firstEntry();
       if (lowestEntry != null) {
         MetricsDB value = lowestEntry.getValue();
+        map.remove(lowestEntry.getKey());
+        value.remove();
+        if (deleteDBFiles) {
+          value.deleteOnDiskFile();
+        }
+      }
+    }
+  }
+
+  public static void trimBatchMetricsDatabases(
+          NavigableMap<Long, BatchMetricsDB> map, int maxSize, boolean deleteDBFiles) throws Exception {
+    while (map.size() > maxSize) {
+      Map.Entry<Long, BatchMetricsDB> lowestEntry = map.firstEntry();
+      if (lowestEntry != null) {
+        BatchMetricsDB value = lowestEntry.getValue();
         map.remove(lowestEntry.getKey());
         value.remove();
         if (deleteDBFiles) {
@@ -274,26 +305,41 @@ public class ReaderMetricsProcessor implements Runnable {
 
     mCurrT = System.currentTimeMillis();
     MetricsDB metricsDB = createMetricsDB(prevWindowStartTime);
+    if (currentBatchDB == null) {
+      currentBatchDB = createBatchMetricsDB(prevWindowStartTime);
+      currentBatchDBStartTime = prevWindowStartTime;
+    } else if (prevWindowStartTime - currentBatchDBStartTime >= PluginSettings.instance().getBatchSize()
+            * MetricsConfiguration.SAMPLING_INTERVAL) {
+      batchDBMap.put(currentBatchDBStartTime, currentBatchDB);
+      currentBatchDB = createBatchMetricsDB(prevWindowStartTime);
+      currentBatchDBStartTime = prevWindowStartTime;
+    }
 
-    emitMasterMetrics(prevWindowStartTime, metricsDB);
-    emitShardRequestMetrics(prevWindowStartTime, alignedOSSnapHolder, osAlignedSnap, metricsDB);
-    emitHttpRequestMetrics(prevWindowStartTime, metricsDB);
-    emitNodeMetrics(currWindowStartTime, metricsDB);
+    emitMasterMetrics(prevWindowStartTime, metricsDB, currentBatchDB);
+    emitShardRequestMetrics(prevWindowStartTime, alignedOSSnapHolder, osAlignedSnap, metricsDB, currentBatchDB);
+    emitHttpRequestMetrics(prevWindowStartTime, metricsDB, currentBatchDB);
+    emitNodeMetrics(currWindowStartTime, metricsDB, currentBatchDB);
 
     metricsDB.commit();
+    currentBatchDB.commit();
     metricsDBMap.put(prevWindowStartTime, metricsDB);
+    if (prevWindowStartTime - currentBatchDBStartTime >= PluginSettings.instance().getBatchSize()
+            * MetricsConfiguration.SAMPLING_INTERVAL) {
+      batchDBMap.put(currentBatchDBStartTime, currentBatchDB);
+      currentBatchDB = null;
+    }
     mFinalT = System.currentTimeMillis();
     LOG.debug("Total time taken for emitting Metrics: {}", mFinalT - mCurrT);
     TIMING_STATS.put("emitMetrics", (double) (mFinalT - mCurrT));
   }
 
-  private void emitHttpRequestMetrics(long prevWindowStartTime, MetricsDB metricsDB)
+  private void emitHttpRequestMetrics(long prevWindowStartTime, MetricsDB metricsDB, BatchMetricsDB batchDB)
       throws Exception {
 
     if (httpRqMetricsMap.containsKey(prevWindowStartTime)) {
 
       HttpRequestMetricsSnapshot prevHttpRqSnap = httpRqMetricsMap.get(prevWindowStartTime);
-      MetricsEmitter.emitHttpMetrics(create, metricsDB, prevHttpRqSnap);
+      MetricsEmitter.emitHttpMetrics(create, metricsDB, batchDB, prevHttpRqSnap);
     } else {
       LOG.debug(
           "Http request snapshot for the previous window does not exist. Not emitting metrics.");
@@ -304,7 +350,8 @@ public class ReaderMetricsProcessor implements Runnable {
       long prevWindowStartTime,
       OSMetricsSnapshot alignedOSSnapHolder,
       OSMetricsSnapshot osAlignedSnap,
-      MetricsDB metricsDB)
+      MetricsDB metricsDB,
+      BatchMetricsDB batchDB)
       throws Exception {
 
     if (shardRqMetricsMap.containsKey(prevWindowStartTime)) {
@@ -316,14 +363,14 @@ public class ReaderMetricsProcessor implements Runnable {
           prevWindowStartTime,
           preShardRequestMetricsSnapshot.windowStartTime);
       MetricsEmitter.emitWorkloadMetrics(
-          create, metricsDB, preShardRequestMetricsSnapshot); // calculate latency
+          create, metricsDB, batchDB, preShardRequestMetricsSnapshot); // calculate latency
       if (osAlignedSnap != null) {
         // LOG.info(osAlignedSnap.fetchAll());
         // LOG.info(preShardRequestMetricsSnapshot.fetchAll());
         MetricsEmitter.emitAggregatedOSMetrics(
-            create, metricsDB, osAlignedSnap, preShardRequestMetricsSnapshot); // table join
+            create, metricsDB, batchDB, osAlignedSnap, preShardRequestMetricsSnapshot); // table join
         MetricsEmitter.emitThreadNameMetrics(
-            create, metricsDB, osAlignedSnap); // threads other than bulk and query
+            create, metricsDB, batchDB, osAlignedSnap); // threads other than bulk and query
       } else {
         LOG.debug("OS METRICS NULL");
       }
@@ -334,13 +381,13 @@ public class ReaderMetricsProcessor implements Runnable {
     }
   }
 
-  private void emitMasterMetrics(long prevWindowStartTime, MetricsDB metricsDB) {
+  private void emitMasterMetrics(long prevWindowStartTime, MetricsDB metricsDB, BatchMetricsDB batchDB) {
 
     if (masterEventMetricsMap.containsKey(prevWindowStartTime)) {
 
       MasterEventMetricsSnapshot preMasterEventSnapshot =
           masterEventMetricsMap.get(prevWindowStartTime);
-      MetricsEmitter.emitMasterEventMetrics(metricsDB, preMasterEventSnapshot);
+      MetricsEmitter.emitMasterEventMetrics(metricsDB, batchDB, preMasterEventSnapshot);
     } else {
       LOG.debug("Master snapshot for the previous window does not exist. Not emitting metrics.");
     }
@@ -673,6 +720,15 @@ public class ReaderMetricsProcessor implements Runnable {
     return db;
   }
 
+  public Map.Entry<Long, BatchMetricsDB> getBatchMetricsDB() {
+    return batchDBMap.lastEntry();
+  }
+
+  public BatchMetricsDB createBatchMetricsDB(long timestamp) throws Exception {
+    BatchMetricsDB db = new BatchMetricsDB(timestamp);
+    return db;
+  }
+
   public void deleteDBs() throws Exception {
     for (MetricsDB db : metricsDBMap.values()) {
       db.remove();
@@ -688,7 +744,7 @@ public class ReaderMetricsProcessor implements Runnable {
    * @param metricsDB on-disk database to which we want to emit metrics
    * @throws Exception if we have issues emitting or aligning metrics
    */
-  public void emitNodeMetrics(long currWindowStartTime, MetricsDB metricsDB) throws Exception {
+  public void emitNodeMetrics(long currWindowStartTime, MetricsDB metricsDB, BatchMetricsDB batchDB) throws Exception {
     long prevWindowStartTime = currWindowStartTime - MetricsConfiguration.SAMPLING_INTERVAL;
 
     for (Map.Entry<AllMetrics.MetricName, NavigableMap<Long, MemoryDBSnapshot>> entry :
@@ -726,7 +782,7 @@ public class ReaderMetricsProcessor implements Runnable {
       }
 
       mCurrT = System.currentTimeMillis();
-      MetricsEmitter.emitNodeMetrics(create, metricsDB, alignedSnapshot);
+      MetricsEmitter.emitNodeMetrics(create, metricsDB, batchDB, alignedSnapshot);
 
       // alignedSnapshotHolder cannot be the left or right window we are
       // trying to align, so we can safely remove.

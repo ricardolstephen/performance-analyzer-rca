@@ -21,6 +21,7 @@ import com.amazon.opendistro.elasticsearch.performanceanalyzer.core.Util;
 import com.amazon.opendistro.elasticsearch.performanceanalyzer.grpc.MetricsRequest;
 import com.amazon.opendistro.elasticsearch.performanceanalyzer.grpc.MetricsResponse;
 import com.amazon.opendistro.elasticsearch.performanceanalyzer.metrics.MetricsRestUtil;
+import com.amazon.opendistro.elasticsearch.performanceanalyzer.metricsdb.BatchMetricsDB;
 import com.amazon.opendistro.elasticsearch.performanceanalyzer.metricsdb.MetricsDB;
 import com.amazon.opendistro.elasticsearch.performanceanalyzer.model.MetricAttributes;
 import com.amazon.opendistro.elasticsearch.performanceanalyzer.model.MetricsModel;
@@ -107,6 +108,24 @@ public class QueryMetricsRequestHandler extends MetricsHandler implements HttpHa
 
       if (isUnitLookUp(exchange)) {
         getMetricUnits(exchange);
+        return;
+      }
+
+      if (isBatchQuery(exchange)) {
+        Map.Entry<Long, BatchMetricsDB> batchDBEntry = mp.getBatchMetricsDB();
+        if (batchDBEntry == null) {
+          sendResponse(
+                  exchange,
+                  "{\"error\":\"There are no batch metrics databases. The reader has run into an issue or has just started.\"}",
+                  HttpURLConnection.HTTP_UNAVAILABLE);
+
+          LOG.warn(
+                  "There are no batch metrics databases. The reader has run into an issue or has just started.");
+          return;
+        }
+        BatchMetricsDB batchDB = batchDBEntry.getValue();
+        Long batchDBTimestamp = batchDBEntry.getKey();
+        handleBatchDBQuery(batchDB, batchDBTimestamp, exchange);
         return;
       }
 
@@ -215,6 +234,123 @@ public class QueryMetricsRequestHandler extends MetricsHandler implements HttpHa
     }
   }
 
+  void handleBatchDBQuery(BatchMetricsDB batchDB, long batchDBTimestamp, HttpExchange exchange) throws IOException {
+    Map<String, String> params = getParamsMap(exchange.getRequestURI().getQuery());
+    exchange.getResponseHeaders().set("Content-Type", "application/json");
+    try {
+
+      String nodes = params.get("nodes");
+      String age = params.get("age");
+      List<String> metricList = metricsRestUtil.parseArrayParam(params, "metrics", false);
+      List<String> aggList = metricsRestUtil.parseArrayParam(params, "agg", false);
+      List<String> dimList = metricsRestUtil.parseArrayParam(params, "dim", true);
+
+      if (metricList.size() != aggList.size()) {
+        sendResponse(
+                exchange,
+                "{\"error\":\"metrics/aggregations should have the same number of entries.\"}",
+                HttpURLConnection.HTTP_BAD_REQUEST);
+        return;
+      }
+
+      if (!validParams(exchange, metricList, dimList, aggList)) {
+        return;
+      }
+
+//      int ageValue = 0;
+//      if (age != null) {
+//        try {
+//          ageValue = Integer.parseUnsignedInt(age);
+//        } catch (NumberFormatException e) {
+//          sendResponse(
+//                  exchange,
+//                  "{\"error\":\"hist must be a non-negative integer.\"}",
+//                  HttpURLConnection.HTTP_BAD_REQUEST);
+//          ageValue = 0;
+//        }
+//      }
+//      if (age > )
+
+
+      String localResponse;
+      if (batchDB != null) {
+        Result<Record> metricResult = batchDB.queryMetric(metricList, aggList, dimList);
+        if (metricResult == null) {
+          localResponse = "{}";
+        } else {
+          localResponse = metricResult.formatJSON();
+        }
+      } else {
+        // Empty JSON.
+        localResponse = "{}";
+      }
+
+      String localResponseWithTimestamp =
+              String.format("{\"timestamp\": %d, \"data\": %s}", batchDBTimestamp, localResponse);
+      ConcurrentHashMap<String, String> nodeResponses = new ConcurrentHashMap<>();
+      final List<ClusterDetailsEventProcessor.NodeDetails> allNodes = ClusterDetailsEventProcessor
+              .getNodesDetails();
+      String localNodeId = "local";
+      if (allNodes.size() != 0) {
+        localNodeId = allNodes.get(0).getId();
+      }
+      nodeResponses.put(localNodeId, localResponseWithTimestamp);
+      String response = metricsRestUtil.nodeJsonBuilder(nodeResponses);
+
+      if (nodes == null || !nodes.equals("all") || allNodes.size() <= 1) {
+        sendResponse(exchange, response, HttpURLConnection.HTTP_OK);
+      } else if (nodes.equals("all")) {
+        CountDownLatch doneSignal = new CountDownLatch(allNodes.size() - 1);
+        for (int i = 1; i < allNodes.size(); i++) {
+          ClusterDetailsEventProcessor.NodeDetails node = allNodes.get(i);
+          LOG.debug("Collecting remote stats");
+          try {
+            collectRemoteStats(node, metricList, aggList, dimList, nodeResponses, doneSignal);
+          } catch (Exception e) {
+            LOG.error(
+                    "Unable to collect stats for node, addr:{}, exception: {} ExceptionCode: {}",
+                    node.getHostAddress(),
+                    e,
+                    StatExceptionCode.REQUEST_REMOTE_ERROR.toString());
+            StatsCollector.instance().logException(StatExceptionCode.REQUEST_REMOTE_ERROR);
+          }
+        }
+        boolean completed = doneSignal.await(TIME_OUT_VALUE, TIME_OUT_UNIT);
+        if (!completed) {
+          LOG.debug("Timeout while collecting remote stats");
+          StatsCollector.instance().logException(StatExceptionCode.REQUEST_REMOTE_ERROR);
+        }
+        sendResponseWhenRequestCompleted(nodeResponses, exchange);
+      }
+    } catch (InvalidParameterException e) {
+      LOG.error("DB file path : {}", batchDB.getDBFilePath());
+      LOG.error(
+              (Supplier<?>)
+                      () ->
+                              new ParameterizedMessage(
+                                      "QueryException {} ExceptionCode: {}.",
+                                      e.toString(),
+                                      StatExceptionCode.REQUEST_ERROR.toString()),
+              e);
+      StatsCollector.instance().logException(StatExceptionCode.REQUEST_ERROR);
+      String response = "{\"error\":\"" + e.getMessage() + "\"}";
+      sendResponse(exchange, response, HttpURLConnection.HTTP_BAD_REQUEST);
+    } catch (Exception e) {
+      LOG.error("DB file path : {}", batchDB.getDBFilePath());
+      LOG.error(
+              (Supplier<?>)
+                      () ->
+                              new ParameterizedMessage(
+                                      "QueryException {} ExceptionCode: {}.",
+                                      e.toString(),
+                                      StatExceptionCode.REQUEST_ERROR.toString()),
+              e);
+      StatsCollector.instance().logException(StatExceptionCode.REQUEST_ERROR);
+      String response = "{\"error\":\"" + e.toString() + "\"}";
+      sendResponse(exchange, response, HttpURLConnection.HTTP_INTERNAL_ERROR);
+    }
+  }
+
   void collectRemoteStats(
       ClusterDetailsEventProcessor.NodeDetails node,
       List<String> metricList,
@@ -241,6 +377,13 @@ public class QueryMetricsRequestHandler extends MetricsHandler implements HttpHa
 
   private boolean isUnitLookUp(HttpExchange exchange) throws IOException {
     if (exchange.getRequestURI().toString().equals(Util.METRICS_QUERY_URL + "/units")) {
+      return true;
+    }
+    return false;
+  }
+
+  private boolean isBatchQuery(HttpExchange exchange) throws IOException {
+    if (exchange.getRequestURI().toString().startsWith(Util.METRICS_QUERY_URL + "/batch")) {
       return true;
     }
     return false;

@@ -38,11 +38,18 @@ public class PluginSettings {
   private static final int WRITER_QUEUE_SIZE_DEFAULT = 100000;
   private static final int DELETION_INTERVAL_MIN = 1;
   private static final int DELETION_INTERVAL_MAX = 60;
+  private static final int BATCH_SIZE_DEFAULT = 6;  // TODO change default to 12
+  private static final int BATCH_COUNT_DEFAULT = 3;  // TODO change default to 5
   private static final String HTTPS_ENABLED = "https-enabled";
   private static final String WRITER_QUEUE_SIZE = "writer-queue-size";
+  private static final String BATCH_SIZE = "batch-size";
+  private static final String BATCH_COUNT = "batch-count";
 
   /** Determines whether the metricsdb files should be cleaned up. */
   public static final String DB_FILE_CLEANUP_CONF_NAME = "cleanup-metrics-db-files";
+
+  /** Determines whether the batchdb files should be cleaned up. */
+  public static final String BATCH_DB_FILE_CLEANUP_CONF_NAME = "cleanup-batch-db-files";
 
   private String metricsLocation;
   private int metricsDeletionInterval;
@@ -50,6 +57,12 @@ public class PluginSettings {
 
   /** If set to true, the metricsdb files are cleaned up, or else the on-disk files are left out. */
   private boolean shouldCleanupMetricsDBFiles;
+
+  /** If set to true, the batchdb files are cleaned up, or else the on-disk files are left out. */
+  private boolean shouldCleanupBatchDBFiles;
+
+  private int batchSize;
+  private int batchCount;
 
   private boolean httpsEnabled;
   private Properties settings;
@@ -73,6 +86,14 @@ public class PluginSettings {
 
   public int getWriterQueueSize() {
     return writerQueueSize;
+  }
+
+  public int getBatchSize() {
+    return batchSize;
+  }
+
+  public int getBatchCount() {
+    return batchCount;
   }
 
   public String getSettingValue(String settingName) {
@@ -104,10 +125,16 @@ public class PluginSettings {
     return shouldCleanupMetricsDBFiles;
   }
 
+  public boolean shouldCleanupBatchDBFiles() {
+    return shouldCleanupBatchDBFiles;
+  }
+
   private PluginSettings(String cfPath) {
     metricsLocation = METRICS_LOCATION_DEFAULT;
     metricsDeletionInterval = DELETION_INTERVAL_DEFAULT;
     writerQueueSize = WRITER_QUEUE_SIZE_DEFAULT;
+    batchSize = BATCH_SIZE_DEFAULT;
+    batchCount = BATCH_COUNT_DEFAULT;
     if (cfPath == null || cfPath.isEmpty()) {
       this.configFilePath = DEFAULT_CONFIG_FILE_PATH;
     } else {
@@ -122,6 +149,9 @@ public class PluginSettings {
       loadWriterQueueSizeFromConfig();
       loadHttpsEnabled();
       loadMetricsDBFilesCleanupEnabled();
+      loadBatchDBFilesCleanupEnabled();
+      loadBatchSizeFromConfig();
+      loadBatchCountFromConfig();
     } catch (ConfigFileException e) {
       LOG.error(
           "Loading config file {} failed with error: {}. Using default values.",
@@ -136,11 +166,14 @@ public class PluginSettings {
     }
     LOG.info(
         "Config: metricsLocation: {}, metricsDeletionInterval: {}, httpsEnabled: {},"
-            + " cleanup-metrics-db-files: {}",
+            + " cleanup-metrics-db-files: {}, cleanup-batch-db-files: {}, batch-size: {}, batch-count: {}",
         metricsLocation,
         metricsDeletionInterval,
         httpsEnabled,
-        shouldCleanupMetricsDBFiles);
+        shouldCleanupMetricsDBFiles,
+        shouldCleanupBatchDBFiles,
+        batchSize,
+        batchCount);
   }
 
   public static PluginSettings instance() {
@@ -237,6 +270,42 @@ public class PluginSettings {
     }
   }
 
+  private void loadBatchSizeFromConfig() {
+    if (!settings.containsKey(BATCH_SIZE)) {
+      return;
+    }
+
+    try {
+      int interval = Integer.parseUnsignedInt(settings.getProperty(BATCH_SIZE));
+      batchSize = interval;
+    } catch (NumberFormatException e) {
+      LOG.error(
+              (Supplier<?>)
+                      () ->
+                              new ParameterizedMessage(
+                                      "Invalid batch-size. Using default value {}.", batchSize),
+              e);
+    }
+  }
+
+  private void loadBatchCountFromConfig() {
+    if (!settings.containsKey(BATCH_COUNT)) {
+      return;
+    }
+
+    try {
+      int interval = Integer.parseUnsignedInt(settings.getProperty(BATCH_COUNT));
+      batchCount = interval;
+    } catch (NumberFormatException e) {
+      LOG.error(
+              (Supplier<?>)
+                      () ->
+                              new ParameterizedMessage(
+                                      "Invalid batch-count. Using default value {}.", batchCount),
+              e);
+    }
+  }
+
   private void loadMetricsDBFilesCleanupEnabled() {
     String cleanupEnabledString = settings.getProperty(DB_FILE_CLEANUP_CONF_NAME, "True");
     try {
@@ -249,6 +318,21 @@ public class PluginSettings {
 
       // In case of exception, we go with the safe default that the files will always be cleaned up.
       shouldCleanupMetricsDBFiles = true;
+    }
+  }
+
+  private void loadBatchDBFilesCleanupEnabled() {
+    String cleanupEnabledString = settings.getProperty(BATCH_DB_FILE_CLEANUP_CONF_NAME, "True");
+    try {
+      shouldCleanupBatchDBFiles = Boolean.parseBoolean(cleanupEnabledString);
+    } catch (Exception ex) {
+      LOG.error(
+              "Unable to parse {} property with value {}. Only true/false expected.",
+              BATCH_DB_FILE_CLEANUP_CONF_NAME,
+              cleanupEnabledString);
+
+      // In case of exception, we go with the safe default that the files will always be cleaned up.
+      shouldCleanupBatchDBFiles = true;
     }
   }
 }

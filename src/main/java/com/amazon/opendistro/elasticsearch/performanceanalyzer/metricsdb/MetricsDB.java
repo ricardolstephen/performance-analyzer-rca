@@ -68,7 +68,7 @@ public class MetricsDB implements Removable {
   public static final Set<String> AGG_VALUES =
       Collections.unmodifiableSet(new HashSet<>(Arrays.asList(SUM, AVG, MIN, MAX)));
 
-  private long windowStartTime;
+  long windowStartTime;
 
   public String getDBFilePath() {
     return PluginSettings.instance()

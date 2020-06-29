@@ -23,6 +23,7 @@ import com.amazon.opendistro.elasticsearch.performanceanalyzer.metrics.AllMetric
 import com.amazon.opendistro.elasticsearch.performanceanalyzer.metricsdb.Dimensions;
 import com.amazon.opendistro.elasticsearch.performanceanalyzer.metricsdb.Metric;
 import com.amazon.opendistro.elasticsearch.performanceanalyzer.metricsdb.MetricsDB;
+import com.amazon.opendistro.elasticsearch.performanceanalyzer.metricsdb.BatchMetricsDB;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -87,6 +88,7 @@ public class MetricsEmitter {
   public static void emitAggregatedOSMetrics(
       final DSLContext create,
       final MetricsDB db,
+      final BatchMetricsDB batchDB,
       final OSMetricsSnapshot osMetricsSnap,
       final ShardRequestMetricsSnapshot rqMetricsSnap)
       throws Exception {
@@ -218,6 +220,8 @@ public class MetricsEmitter {
           };
       db.createMetric(new Metric<Double>(metricColumn, 0d), dims);
       BatchBindStep handle = db.startBatchPut(new Metric<Double>(metricColumn, 0d), dims);
+      batchDB.createMetric(new Metric<Double>(metricColumn, 0d), dims);
+      BatchBindStep batchDBHandle = batchDB.startBatchPut(new Metric<Double>(metricColumn, 0d), dims);
       for (Record r : res) {
         if (r.get(MetricsDB.SUM + "_" + metricColumn) == null) {
           continue;
@@ -236,10 +240,22 @@ public class MetricsEmitter {
             avgMetric,
             minMetric,
             maxMetric);
+        batchDBHandle.bind(
+                r.get(ShardRequestMetricsSnapshot.Fields.SHARD_ID.toString()).toString(),
+                r.get(ShardRequestMetricsSnapshot.Fields.INDEX_NAME.toString()).toString(),
+                r.get(ShardRequestMetricsSnapshot.Fields.OPERATION.toString()).toString(),
+                r.get(ShardRequestMetricsSnapshot.Fields.SHARD_ROLE.toString()).toString(),
+                sumMetric,
+                avgMetric,
+                minMetric,
+                maxMetric);
       }
 
       if (handle.size() > 0) {
         handle.execute();
+      }
+      if (batchDBHandle.size() > 0) {
+        batchDBHandle.execute();
       }
     }
     mFinalT = System.currentTimeMillis();
@@ -281,16 +297,21 @@ public class MetricsEmitter {
   }
 
   public static void emitWorkloadMetrics(
-      final DSLContext create, final MetricsDB db, final ShardRequestMetricsSnapshot rqMetricsSnap)
-      throws Exception {
+      final DSLContext create, final MetricsDB db, final BatchMetricsDB batchDB,
+      final ShardRequestMetricsSnapshot rqMetricsSnap) throws Exception {
     long mCurrT = System.currentTimeMillis();
     Result<Record> res = rqMetricsSnap.fetchLatencyByOp();
 
     db.createMetric(
         new Metric<Double>(CommonMetric.LATENCY.toString(), 0d), LATENCY_TABLE_DIMENSIONS);
+    batchDB.createMetric(
+            new Metric<Double>(CommonMetric.LATENCY.toString(), 0d), LATENCY_TABLE_DIMENSIONS);
     BatchBindStep handle =
         db.startBatchPut(
             new Metric<Double>(CommonMetric.LATENCY.toString(), 0d), LATENCY_TABLE_DIMENSIONS);
+    BatchBindStep batchDBHandle =
+            batchDB.startBatchPut(
+                    new Metric<Double>(CommonMetric.LATENCY.toString(), 0d), LATENCY_TABLE_DIMENSIONS);
 
     // Dims need to be changed.
     List<String> shardDims =
@@ -306,16 +327,29 @@ public class MetricsEmitter {
     db.createMetric(
         new Metric<Double>(AllMetrics.ShardOperationMetric.SHARD_OP_COUNT.toString(), 0d),
         shardDims);
+    batchDB.createMetric(
+            new Metric<Double>(AllMetrics.ShardOperationMetric.SHARD_OP_COUNT.toString(), 0d),
+            shardDims);
     BatchBindStep countHandle =
         db.startBatchPut(
             new Metric<Double>(AllMetrics.ShardOperationMetric.SHARD_OP_COUNT.toString(), 0d),
             shardDims);
+    BatchBindStep batchDBCountHandle =
+            batchDB.startBatchPut(
+                    new Metric<Double>(AllMetrics.ShardOperationMetric.SHARD_OP_COUNT.toString(), 0d),
+                    shardDims);
+
 
     db.createMetric(
         new Metric<Double>(AllMetrics.ShardBulkMetric.DOC_COUNT.toString(), 0d), shardDims);
+    batchDB.createMetric(
+            new Metric<Double>(AllMetrics.ShardBulkMetric.DOC_COUNT.toString(), 0d), shardDims);
     BatchBindStep bulkDocHandle =
         db.startBatchPut(
             new Metric<Double>(AllMetrics.ShardBulkMetric.DOC_COUNT.toString(), 0d), shardDims);
+    BatchBindStep batchDBBulkDocHandle =
+            batchDB.startBatchPut(
+                    new Metric<Double>(AllMetrics.ShardBulkMetric.DOC_COUNT.toString(), 0d), shardDims);
 
     for (Record r : res) {
       Double sumLatency =
@@ -355,6 +389,18 @@ public class MetricsEmitter {
           avgLatency,
           minLatency,
           maxLatency);
+      batchDBHandle.bind(
+              r.get(ShardRequestMetricsSnapshot.Fields.OPERATION.toString()).toString(),
+              null,
+              null,
+              null,
+              r.get(ShardRequestMetricsSnapshot.Fields.SHARD_ID.toString()).toString(),
+              r.get(ShardRequestMetricsSnapshot.Fields.INDEX_NAME.toString()).toString(),
+              r.get(ShardRequestMetricsSnapshot.Fields.SHARD_ROLE.toString()).toString(),
+              sumLatency,
+              avgLatency,
+              minLatency,
+              maxLatency);
 
       Double count =
           Double.parseDouble(
@@ -368,6 +414,15 @@ public class MetricsEmitter {
           count,
           count,
           count);
+      batchDBCountHandle.bind(
+              r.get(ShardRequestMetricsSnapshot.Fields.OPERATION.toString()).toString(),
+              r.get(ShardRequestMetricsSnapshot.Fields.SHARD_ID.toString()).toString(),
+              r.get(ShardRequestMetricsSnapshot.Fields.INDEX_NAME.toString()).toString(),
+              r.get(ShardRequestMetricsSnapshot.Fields.SHARD_ROLE.toString()).toString(),
+              count,
+              count,
+              count,
+              count);
 
       Object bulkDocCountObj = r.get(AllMetrics.ShardBulkMetric.DOC_COUNT.toString());
       if (bulkDocCountObj != null) {
@@ -381,23 +436,41 @@ public class MetricsEmitter {
             bulkDocCount,
             bulkDocCount,
             bulkDocCount);
+        batchDBBulkDocHandle.bind(
+                r.get(ShardRequestMetricsSnapshot.Fields.OPERATION.toString()).toString(),
+                r.get(ShardRequestMetricsSnapshot.Fields.SHARD_ID.toString()).toString(),
+                r.get(ShardRequestMetricsSnapshot.Fields.INDEX_NAME.toString()).toString(),
+                r.get(ShardRequestMetricsSnapshot.Fields.SHARD_ROLE.toString()).toString(),
+                bulkDocCount,
+                bulkDocCount,
+                bulkDocCount,
+                bulkDocCount);
       }
     }
     if (handle.size() > 0) {
       handle.execute();
     }
+    if (batchDBHandle.size() > 0) {
+      batchDBHandle.execute();
+    }
     if (countHandle.size() > 0) {
       countHandle.execute();
     }
+    if (batchDBCountHandle.size() > 0) {
+      batchDBCountHandle.execute();
+    }
     if (bulkDocHandle.size() > 0) {
       bulkDocHandle.execute();
+    }
+    if (batchDBBulkDocHandle.size() > 0) {
+      batchDBBulkDocHandle.execute();
     }
     long mFinalT = System.currentTimeMillis();
     LOG.debug("Total time taken for writing workload metrics metricsdb: {}", mFinalT - mCurrT);
   }
 
   public static void emitThreadNameMetrics(
-      final DSLContext create, final MetricsDB db, final OSMetricsSnapshot osMetricsSnap)
+      final DSLContext create, final MetricsDB db, final BatchMetricsDB batchDB, final OSMetricsSnapshot osMetricsSnap)
       throws Exception {
     long mCurrT = System.currentTimeMillis();
     Result<Record> res = osMetricsSnap.getOSMetrics();
@@ -426,6 +499,7 @@ public class MetricsEmitter {
           LOG.debug("Putting merge metric {}", metric);
         }
         db.putMetric(new Metric<Double>(metricColumn, metric), dimensions, 0);
+        batchDB.putMetric(new Metric<Double>(metricColumn, metric), dimensions, 0);
       }
     }
     long mFinalT = System.currentTimeMillis();
@@ -485,8 +559,8 @@ public class MetricsEmitter {
   }
 
   public static void emitHttpMetrics(
-      final DSLContext create, final MetricsDB db, final HttpRequestMetricsSnapshot rqMetricsSnap)
-      throws Exception {
+      final DSLContext create, final MetricsDB db, final BatchMetricsDB batchDB,
+      final HttpRequestMetricsSnapshot rqMetricsSnap) throws Exception {
     long mCurrT = System.currentTimeMillis();
     Dimensions dimensions = new Dimensions();
     Result<Record> res = rqMetricsSnap.fetchLatencyByOp();
@@ -503,11 +577,18 @@ public class MetricsEmitter {
     db.createMetric(
         new Metric<Double>(AllMetrics.CommonMetric.LATENCY.toString(), 0d),
         LATENCY_TABLE_DIMENSIONS);
+    batchDB.createMetric(
+            new Metric<Double>(AllMetrics.CommonMetric.LATENCY.toString(), 0d),
+            LATENCY_TABLE_DIMENSIONS);
 
     db.createMetric(
         new Metric<Double>(AllMetrics.HttpMetric.HTTP_TOTAL_REQUESTS.toString(), 0d), dims);
+    batchDB.createMetric(
+            new Metric<Double>(AllMetrics.HttpMetric.HTTP_TOTAL_REQUESTS.toString(), 0d), dims);
     db.createMetric(
         new Metric<Double>(AllMetrics.HttpMetric.HTTP_REQUEST_DOCS.toString(), 0d), dims);
+    batchDB.createMetric(
+            new Metric<Double>(AllMetrics.HttpMetric.HTTP_REQUEST_DOCS.toString(), 0d), dims);
 
     for (Record r : res) {
       dimensions.put(
@@ -590,10 +671,23 @@ public class MetricsEmitter {
               maxLatency),
           dimensions,
           0);
+      batchDB.putMetric(
+              new Metric<Double>(
+                      AllMetrics.CommonMetric.LATENCY.toString(),
+                      sumLatency,
+                      avgLatency,
+                      minLatency,
+                      maxLatency),
+              dimensions,
+              0);
       db.putMetric(
           new Metric<Double>(AllMetrics.HttpMetric.HTTP_TOTAL_REQUESTS.toString(), count),
           dimensions,
           0);
+      batchDB.putMetric(
+              new Metric<Double>(AllMetrics.HttpMetric.HTTP_TOTAL_REQUESTS.toString(), count),
+              dimensions,
+              0);
       db.putMetric(
           new Metric<Double>(
               AllMetrics.HttpMetric.HTTP_REQUEST_DOCS.toString(),
@@ -603,6 +697,15 @@ public class MetricsEmitter {
               maxItemCount),
           dimensions,
           0);
+      batchDB.putMetric(
+              new Metric<Double>(
+                      AllMetrics.HttpMetric.HTTP_REQUEST_DOCS.toString(),
+                      sumItemCount,
+                      avgItemCount,
+                      minItemCount,
+                      maxItemCount),
+              dimensions,
+              0);
     }
 
     long mFinalT = System.currentTimeMillis();
@@ -610,7 +713,7 @@ public class MetricsEmitter {
   }
 
   public static void emitMasterEventMetrics(
-      MetricsDB metricsDB, MasterEventMetricsSnapshot masterEventMetricsSnapshot) {
+      MetricsDB metricsDB, BatchMetricsDB batchDB, MasterEventMetricsSnapshot masterEventMetricsSnapshot) {
 
     long mCurrT = System.currentTimeMillis();
     Result<Record> queueAndRunTimeResult = masterEventMetricsSnapshot.fetchQueueAndRunTime();
@@ -625,8 +728,8 @@ public class MetricsEmitter {
           }
         };
 
-    emitQueueTimeMetric(metricsDB, queueAndRunTimeResult, dims);
-    emitRuntimeMetric(metricsDB, queueAndRunTimeResult, dims);
+    emitQueueTimeMetric(metricsDB, batchDB, queueAndRunTimeResult, dims);
+    emitRuntimeMetric(metricsDB, batchDB, queueAndRunTimeResult, dims);
 
     long mFinalT = System.currentTimeMillis();
     LOG.debug(
@@ -634,16 +737,23 @@ public class MetricsEmitter {
   }
 
   private static void emitRuntimeMetric(
-      MetricsDB metricsDB, Result<Record> res, List<String> dims) {
+      MetricsDB metricsDB, BatchMetricsDB batchDB, Result<Record> res, List<String> dims) {
 
     metricsDB.createMetric(
         new Metric<Double>(AllMetrics.MasterMetricValues.MASTER_TASK_RUN_TIME.toString(), 0d),
         dims);
+    batchDB.createMetric(
+            new Metric<Double>(AllMetrics.MasterMetricValues.MASTER_TASK_RUN_TIME.toString(), 0d),
+            dims);
 
     BatchBindStep handle =
         metricsDB.startBatchPut(
             new Metric<Double>(AllMetrics.MasterMetricValues.MASTER_TASK_RUN_TIME.toString(), 0d),
             dims);
+    BatchBindStep batchDBHandle =
+            batchDB.startBatchPut(
+                    new Metric<Double>(AllMetrics.MasterMetricValues.MASTER_TASK_RUN_TIME.toString(), 0d),
+                    dims);
 
     for (Record r : res) {
 
@@ -688,22 +798,39 @@ public class MetricsEmitter {
           avgQueueTime,
           minQueueTime,
           maxQueueTime);
+      batchDBHandle.bind(
+              r.get(AllMetrics.MasterMetricDimensions.MASTER_TASK_INSERT_ORDER.toString()).toString(),
+              r.get(AllMetrics.MasterMetricDimensions.MASTER_TASK_PRIORITY.toString()).toString(),
+              r.get(AllMetrics.MasterMetricDimensions.MASTER_TASK_TYPE.toString()).toString(),
+              r.get(AllMetrics.MasterMetricDimensions.MASTER_TASK_METADATA.toString()).toString(),
+              sumQueueTime,
+              avgQueueTime,
+              minQueueTime,
+              maxQueueTime);
     }
 
     handle.execute();
+    batchDBHandle.execute();
   }
 
   private static void emitQueueTimeMetric(
-      MetricsDB metricsDB, Result<Record> res, List<String> dims) {
+      MetricsDB metricsDB, BatchMetricsDB batchDB, Result<Record> res, List<String> dims) {
 
     metricsDB.createMetric(
         new Metric<Double>(AllMetrics.MasterMetricValues.MASTER_TASK_QUEUE_TIME.toString(), 0d),
         dims);
+    batchDB.createMetric(
+            new Metric<Double>(AllMetrics.MasterMetricValues.MASTER_TASK_QUEUE_TIME.toString(), 0d),
+            dims);
 
     BatchBindStep handle =
         metricsDB.startBatchPut(
             new Metric<Double>(AllMetrics.MasterMetricValues.MASTER_TASK_QUEUE_TIME.toString(), 0d),
             dims);
+    BatchBindStep batchDBHandle =
+            batchDB.startBatchPut(
+                    new Metric<Double>(AllMetrics.MasterMetricValues.MASTER_TASK_QUEUE_TIME.toString(), 0d),
+                    dims);
 
     for (Record r : res) {
 
@@ -748,9 +875,19 @@ public class MetricsEmitter {
           avgQueueTime,
           minQueueTime,
           maxQueueTime);
+      batchDBHandle.bind(
+              r.get(AllMetrics.MasterMetricDimensions.MASTER_TASK_INSERT_ORDER.toString()).toString(),
+              r.get(AllMetrics.MasterMetricDimensions.MASTER_TASK_PRIORITY.toString()).toString(),
+              r.get(AllMetrics.MasterMetricDimensions.MASTER_TASK_TYPE.toString()).toString(),
+              r.get(AllMetrics.MasterMetricDimensions.MASTER_TASK_METADATA.toString()).toString(),
+              sumQueueTime,
+              avgQueueTime,
+              minQueueTime,
+              maxQueueTime);
     }
 
     handle.execute();
+    batchDBHandle.execute();
   }
 
   /**
@@ -766,7 +903,8 @@ public class MetricsEmitter {
    *     database.
    */
   public static void emitNodeMetrics(
-      final DSLContext create, final MetricsDB db, final MemoryDBSnapshot snap) throws Exception {
+      final DSLContext create, final MetricsDB db, final BatchMetricsDB batchDB,
+      final MemoryDBSnapshot snap) throws Exception {
 
     Map<String, SelectHavingStep<Record>> metadataTable = snap.selectMetadataSource();
 
@@ -793,8 +931,10 @@ public class MetricsEmitter {
       List<Field<?>> selectFields = selectField.get(tableName);
 
       db.createMetric(new Metric<Double>(tableName, 0d), dimensionNames);
+      batchDB.createMetric(new Metric<Double>(tableName, 0d), dimensionNames);
 
       BatchBindStep handle = db.startBatchPut(tableName, selectFields.size());
+      BatchBindStep batchDBHandle = batchDB.startBatchPut(tableName, selectFields.size());
       for (Record r : fetchedData) {
         int columnNum = selectFields.size();
         Object[] bindValues = new Object[columnNum];
@@ -802,8 +942,10 @@ public class MetricsEmitter {
           bindValues[i] = r.get(selectFields.get(i).getName());
         }
         handle.bind(bindValues);
+        batchDBHandle.bind(bindValues);
       }
       handle.execute();
+      batchDBHandle.execute();
 
       mFinalT = System.currentTimeMillis();
       LOG.debug(
