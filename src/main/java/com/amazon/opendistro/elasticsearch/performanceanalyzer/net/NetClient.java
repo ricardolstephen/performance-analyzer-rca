@@ -18,13 +18,7 @@ package com.amazon.opendistro.elasticsearch.performanceanalyzer.net;
 import com.amazon.opendistro.elasticsearch.performanceanalyzer.PerformanceAnalyzerApp;
 import com.amazon.opendistro.elasticsearch.performanceanalyzer.collectors.StatExceptionCode;
 import com.amazon.opendistro.elasticsearch.performanceanalyzer.collectors.StatsCollector;
-import com.amazon.opendistro.elasticsearch.performanceanalyzer.grpc.FlowUnitMessage;
-import com.amazon.opendistro.elasticsearch.performanceanalyzer.grpc.InterNodeRpcServiceGrpc;
-import com.amazon.opendistro.elasticsearch.performanceanalyzer.grpc.MetricsRequest;
-import com.amazon.opendistro.elasticsearch.performanceanalyzer.grpc.MetricsResponse;
-import com.amazon.opendistro.elasticsearch.performanceanalyzer.grpc.PublishResponse;
-import com.amazon.opendistro.elasticsearch.performanceanalyzer.grpc.SubscribeMessage;
-import com.amazon.opendistro.elasticsearch.performanceanalyzer.grpc.SubscribeResponse;
+import com.amazon.opendistro.elasticsearch.performanceanalyzer.grpc.*;
 import com.amazon.opendistro.elasticsearch.performanceanalyzer.rca.framework.metrics.RcaGraphMetrics;
 import io.grpc.StatusRuntimeException;
 import io.grpc.stub.StreamObserver;
@@ -118,6 +112,15 @@ public class NetClient {
     InterNodeRpcServiceGrpc.InterNodeRpcServiceStub stub =
         connectionManager.getClientStubForHost(remoteNodeIP);
     stub.getMetrics(request, responseObserver);
+  }
+
+  public void getBatchMetrics(
+          String remoteNodeIP,
+          BatchMetricsRequest request,
+          StreamObserver<MetricsResponse> responseObserver) {
+    InterNodeRpcServiceGrpc.InterNodeRpcServiceStub stub =
+            connectionManager.getClientStubForHost(remoteNodeIP);
+    stub.getBatchMetrics(request, responseObserver);
   }
 
   public void stop() {

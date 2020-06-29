@@ -19,6 +19,9 @@ service InterNodeRpcService {
 
     // get Metrics for a particular node
     rpc GetMetrics(MetricsRequest) returns (MetricsResponse) {}
+
+    // get Batch Metrics for a particular node
+    rpc GetBatchMetrics(BatchMetricsRequest) returns (MetricsResponse) {}
 }
 
 /*
@@ -179,6 +182,17 @@ message MetricsRequest {
     repeated string agg_list = 2;
     repeated string dim_list = 3;
 }
+
+/*
+ Request Parameters for GetMetrics API
+*/
+message BatchMetricsRequest {
+    uint32 age = 1;
+    repeated string metric_list = 2;
+    repeated string agg_list = 3;
+    repeated string dim_list = 4;
+}
+
 
 /*
  GetMetrics function returns string as a response

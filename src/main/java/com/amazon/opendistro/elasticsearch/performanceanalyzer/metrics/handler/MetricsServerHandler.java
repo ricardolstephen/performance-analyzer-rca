@@ -15,8 +15,11 @@
 
 package com.amazon.opendistro.elasticsearch.performanceanalyzer.metrics.handler;
 
+import com.amazon.opendistro.elasticsearch.performanceanalyzer.config.PluginSettings;
+import com.amazon.opendistro.elasticsearch.performanceanalyzer.grpc.BatchMetricsRequest;
 import com.amazon.opendistro.elasticsearch.performanceanalyzer.grpc.MetricsRequest;
 import com.amazon.opendistro.elasticsearch.performanceanalyzer.grpc.MetricsResponse;
+import com.amazon.opendistro.elasticsearch.performanceanalyzer.metricsdb.BatchMetricsDB;
 import com.amazon.opendistro.elasticsearch.performanceanalyzer.metricsdb.MetricsDB;
 import com.amazon.opendistro.elasticsearch.performanceanalyzer.reader.ReaderMetricsProcessor;
 import io.grpc.stub.StreamObserver;
@@ -40,6 +43,41 @@ public class MetricsServerHandler {
 
       MetricsDB db = dbEntry.getValue();
       Long dbTimestamp = dbEntry.getKey();
+
+      List<String> metricList = request.getMetricListList();
+      List<String> aggList = request.getAggListList();
+      List<String> dimList = request.getDimListList();
+
+      collectStats(db, dbTimestamp, metricList, aggList, dimList, responseObserver);
+    } catch (Exception e) {
+      e.printStackTrace();
+    }
+  }
+
+  public void collectBatchAPIData(
+          BatchMetricsRequest request, StreamObserver<MetricsResponse> responseObserver) {
+    try {
+      ReaderMetricsProcessor mp = ReaderMetricsProcessor.getInstance();
+
+      int age = request.getAge();
+      if (age >= PluginSettings.instance().getBatchCount()) {
+        sendResponse(
+                "{\"error\":\"age exceeds the maximum age configured for this domain.\"}",
+                responseObserver);
+        return;
+      }
+
+      Map.Entry<Long, BatchMetricsDB> batchDBEntry = mp.getNthBatchMetricsDB(age);
+      if (batchDBEntry == null) {
+        sendResponse(
+                "{\"error\":\"There are insufficient batch metrics databases. The reader has run into an issue or has just started.\"}",
+                responseObserver);
+        LOG.warn(
+                "There are insufficient batch metrics databases. The reader has run into an issue or has just started.");
+        return;
+      }
+      BatchMetricsDB db = batchDBEntry.getValue();
+      Long dbTimestamp = batchDBEntry.getKey();
 
       List<String> metricList = request.getMetricListList();
       List<String> aggList = request.getAggListList();

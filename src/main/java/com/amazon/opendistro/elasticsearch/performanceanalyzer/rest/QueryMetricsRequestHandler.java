@@ -17,7 +17,9 @@ package com.amazon.opendistro.elasticsearch.performanceanalyzer.rest;
 
 import com.amazon.opendistro.elasticsearch.performanceanalyzer.collectors.StatExceptionCode;
 import com.amazon.opendistro.elasticsearch.performanceanalyzer.collectors.StatsCollector;
+import com.amazon.opendistro.elasticsearch.performanceanalyzer.config.PluginSettings;
 import com.amazon.opendistro.elasticsearch.performanceanalyzer.core.Util;
+import com.amazon.opendistro.elasticsearch.performanceanalyzer.grpc.BatchMetricsRequest;
 import com.amazon.opendistro.elasticsearch.performanceanalyzer.grpc.MetricsRequest;
 import com.amazon.opendistro.elasticsearch.performanceanalyzer.grpc.MetricsResponse;
 import com.amazon.opendistro.elasticsearch.performanceanalyzer.metrics.MetricsRestUtil;
@@ -112,20 +114,7 @@ public class QueryMetricsRequestHandler extends MetricsHandler implements HttpHa
       }
 
       if (isBatchQuery(exchange)) {
-        Map.Entry<Long, BatchMetricsDB> batchDBEntry = mp.getBatchMetricsDB();
-        if (batchDBEntry == null) {
-          sendResponse(
-                  exchange,
-                  "{\"error\":\"There are no batch metrics databases. The reader has run into an issue or has just started.\"}",
-                  HttpURLConnection.HTTP_UNAVAILABLE);
-
-          LOG.warn(
-                  "There are no batch metrics databases. The reader has run into an issue or has just started.");
-          return;
-        }
-        BatchMetricsDB batchDB = batchDBEntry.getValue();
-        Long batchDBTimestamp = batchDBEntry.getKey();
-        handleBatchDBQuery(batchDB, batchDBTimestamp, exchange);
+        handleBatchDBQuery(mp, exchange);
         return;
       }
 
@@ -234,13 +223,48 @@ public class QueryMetricsRequestHandler extends MetricsHandler implements HttpHa
     }
   }
 
-  void handleBatchDBQuery(BatchMetricsDB batchDB, long batchDBTimestamp, HttpExchange exchange) throws IOException {
+  void handleBatchDBQuery(ReaderMetricsProcessor mp, HttpExchange exchange) throws IOException {
     Map<String, String> params = getParamsMap(exchange.getRequestURI().getQuery());
     exchange.getResponseHeaders().set("Content-Type", "application/json");
+
+    String age = params.get("age");
+    int ageValue = 0;
+    if (age != null) {
+      try {
+        ageValue = Integer.parseUnsignedInt(age);
+      } catch (NumberFormatException e) {
+        sendResponse(
+                exchange,
+                "{\"error\":\"age must be a non-negative integer.\"}",
+                HttpURLConnection.HTTP_BAD_REQUEST);
+        return;
+      }
+    }
+    if (ageValue >= PluginSettings.instance().getBatchCount()) {
+      sendResponse(
+              exchange,
+              "{\"error\":\"age exceeds the maximum age configured for this domain.\"}",
+              HttpURLConnection.HTTP_BAD_REQUEST);
+      return;
+    }
+
+    Map.Entry<Long, BatchMetricsDB> batchDBEntry = mp.getNthBatchMetricsDB(ageValue);
+    if (batchDBEntry == null) {
+      sendResponse(
+              exchange,
+              "{\"error\":\"There are insufficient batch metrics databases. The reader has run into an issue or has just started.\"}",
+              HttpURLConnection.HTTP_UNAVAILABLE);
+      LOG.warn(
+              "There are insufficient batch metrics databases. The reader has run into an issue or has just started.");
+      return;
+    }
+    BatchMetricsDB batchDB = batchDBEntry.getValue();
+    Long batchDBTimestamp = batchDBEntry.getKey();
+
+
     try {
 
       String nodes = params.get("nodes");
-      String age = params.get("age");
       List<String> metricList = metricsRestUtil.parseArrayParam(params, "metrics", false);
       List<String> aggList = metricsRestUtil.parseArrayParam(params, "agg", false);
       List<String> dimList = metricsRestUtil.parseArrayParam(params, "dim", true);
@@ -256,21 +280,6 @@ public class QueryMetricsRequestHandler extends MetricsHandler implements HttpHa
       if (!validParams(exchange, metricList, dimList, aggList)) {
         return;
       }
-
-//      int ageValue = 0;
-//      if (age != null) {
-//        try {
-//          ageValue = Integer.parseUnsignedInt(age);
-//        } catch (NumberFormatException e) {
-//          sendResponse(
-//                  exchange,
-//                  "{\"error\":\"hist must be a non-negative integer.\"}",
-//                  HttpURLConnection.HTTP_BAD_REQUEST);
-//          ageValue = 0;
-//        }
-//      }
-//      if (age > )
-
 
       String localResponse;
       if (batchDB != null) {
@@ -305,7 +314,7 @@ public class QueryMetricsRequestHandler extends MetricsHandler implements HttpHa
           ClusterDetailsEventProcessor.NodeDetails node = allNodes.get(i);
           LOG.debug("Collecting remote stats");
           try {
-            collectRemoteStats(node, metricList, aggList, dimList, nodeResponses, doneSignal);
+            collectRemoteBatchStats(node, ageValue, metricList, aggList, dimList, nodeResponses, doneSignal);
           } catch (Exception e) {
             LOG.error(
                     "Unable to collect stats for node, addr:{}, exception: {} ExceptionCode: {}",
@@ -348,6 +357,32 @@ public class QueryMetricsRequestHandler extends MetricsHandler implements HttpHa
       StatsCollector.instance().logException(StatExceptionCode.REQUEST_ERROR);
       String response = "{\"error\":\"" + e.toString() + "\"}";
       sendResponse(exchange, response, HttpURLConnection.HTTP_INTERNAL_ERROR);
+    }
+  }
+
+  void collectRemoteBatchStats(
+          ClusterDetailsEventProcessor.NodeDetails node,
+          int age,
+          List<String> metricList,
+          List<String> aggList,
+          List<String> dimList,
+          final ConcurrentHashMap<String, String> nodeResponses,
+          final CountDownLatch doneSignal)
+          throws Exception {
+    // create a request
+    BatchMetricsRequest request =
+            BatchMetricsRequest.newBuilder()
+                    .setAge(age)
+                    .addAllMetricList(metricList)
+                    .addAllAggList(aggList)
+                    .addAllDimList(dimList)
+                    .build();
+    ThreadSafeStreamObserver responseObserver =
+            new ThreadSafeStreamObserver(node, nodeResponses, doneSignal);
+    try {
+      this.netClient.getBatchMetrics(node.getHostAddress(), request, responseObserver);
+    } catch (Exception e) {
+      LOG.error("Metrics : Exception occurred while getting Metrics {}", e.getCause());
     }
   }
 

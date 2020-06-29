@@ -720,8 +720,20 @@ public class ReaderMetricsProcessor implements Runnable {
     return db;
   }
 
-  public Map.Entry<Long, BatchMetricsDB> getBatchMetricsDB() {
-    return batchDBMap.lastEntry();
+  // Precondition: n >= 0
+  public Map.Entry<Long, BatchMetricsDB> getNthBatchMetricsDB(int n) {
+    if (n < 0 || n >= batchDBMap.size()) {
+      return null;
+    }
+    Map.Entry<Long, BatchMetricsDB> entry = batchDBMap.lastEntry();
+    while (n-- > 0) {
+      Map.Entry<Long, BatchMetricsDB> next = batchDBMap.lowerEntry(entry.getKey());
+      if (next == null) {
+        return entry;
+      }
+      entry = next;
+    }
+    return entry;
   }
 
   public BatchMetricsDB createBatchMetricsDB(long timestamp) throws Exception {
