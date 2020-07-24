@@ -44,6 +44,7 @@ import com.amazon.opendistro.elasticsearch.performanceanalyzer.rca.stats.emitter
 import com.amazon.opendistro.elasticsearch.performanceanalyzer.rca.stats.listeners.IListener;
 import com.amazon.opendistro.elasticsearch.performanceanalyzer.rca.stats.measurements.MeasurementSet;
 import com.amazon.opendistro.elasticsearch.performanceanalyzer.reader.ReaderMetricsProcessor;
+import com.amazon.opendistro.elasticsearch.performanceanalyzer.rest.QueryBatchRequestHandler;
 import com.amazon.opendistro.elasticsearch.performanceanalyzer.rest.QueryMetricsRequestHandler;
 import com.amazon.opendistro.elasticsearch.performanceanalyzer.threads.ThreadProvider;
 import com.amazon.opendistro.elasticsearch.performanceanalyzer.threads.exceptions.PAThreadException;
@@ -64,6 +65,7 @@ public class PerformanceAnalyzerApp {
 
   private static final int EXCEPTION_QUEUE_LENGTH = 1;
   public static final String QUERY_URL = "/_opendistro/_performanceanalyzer/metrics";
+  public static final String BATCH_METRICS_URL = "/_opendistro/_performanceanalyzer/batch";
   private static final Logger LOG = LogManager.getLogger(PerformanceAnalyzerApp.class);
   private static final ScheduledMetricCollectorsExecutor METRIC_COLLECTOR_EXECUTOR =
       new ScheduledMetricCollectorsExecutor(1, false);
@@ -232,6 +234,7 @@ public class PerformanceAnalyzerApp {
     HttpServer httpServer =
         PerformanceAnalyzerWebServer.createInternalServer(PluginSettings.instance());
     httpServer.createContext(QUERY_URL, new QueryMetricsRequestHandler(netClient, metricsRestUtil));
+    httpServer.createContext(BATCH_METRICS_URL, new QueryBatchRequestHandler(netClient, metricsRestUtil));
 
     return new ClientServers(httpServer, netServer, netClient);
   }
