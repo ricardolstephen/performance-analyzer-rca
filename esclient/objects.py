@@ -199,7 +199,15 @@ class Host:
         self.logger.info(resp.text)
         return resp.json()
 
-    def get_batch_metrics(self, starttime, endtime):
+    def get_batch_metrics(self, starttime, endtime, period=None, maxdatapoints=None):
+        if period and period >= 5 and period % 5 == 0:
+            period_param = f'&period={period}'
+        else:
+            period_param = ''
+        if maxdatapoints and maxdatapoints >= 0:
+            maxdatapoints_param = f'&maxdatapoints={maxdatapoints}'
+        else:
+            maxdatapoints_param = ''
         url = ''.join((self.protocol, '://', self.hostname, ':',
                        '9600',
                        '/_opendistro/_performanceanalyzer/batch',
@@ -207,7 +215,9 @@ class Host:
                        '&starttime=',
                        str(starttime),
                        '&endtime=',
-                       str(endtime)))
+                       str(endtime),
+                       period_param,
+                       maxdatapoints_param))
         resp = requests.get(url, timeout=DEFAULT_TIMEOUT)
         resp.raise_for_status()
         self.logger.info(resp.text)

@@ -42,7 +42,20 @@ if __name__ == '__main__':
     elif sys.argv[1] == 'get_batch':
         starttime = int(time.time()*1000)
         endtime = starttime - (60000) * 3
-        data = host.get_batch_metrics(starttime, endtime)
+        period = None
+        maxdatapoints = None
+        if len(sys.argv) > 2:
+            if sys.argv[2].startswith('period='):
+                period = int(sys.argv[2].replace('period=', ''))
+            elif sys.argv[2].startswith('maxdatapoints='):
+                maxdatapoints = int(sys.argv[2].replace('maxdatapoints=', ''))
+        if len(sys.argv) > 3:
+            if sys.argv[3].startswith('period='):
+                period = int(sys.argv[3].replace('period='), '')
+            elif sys.argv[3].startswith('maxdatapoints='):
+                maxdatapoints = int(sys.argv[3].replace('maxdatapoints=', ''))
+        data = host.get_batch_metrics(starttime, endtime, period=period,
+                                      maxdatapoints=maxdatapoints)
         print(json.dumps(data, indent=4))
     else:
         raise Exception(f'Invalid argument {sys.argv[1]}')
